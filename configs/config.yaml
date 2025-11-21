@@ -1,0 +1,60 @@
+# Configuración de entrenamiento DINOv2 Siamese
+seed: 42
+
+paths:
+  countries_root: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/croped/local   # carpeta que contiene subdirectorios país (arg, bra, chl, col, mex, per, ury, ...)
+  metadata: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/metadata - copia.json  # archivo con factores de balanceo
+  checkpoints_dir: checkpoints
+  logs_dir: logs
+
+data:
+  size_img: 518
+
+model:
+  backbone_name: vit_small_patch14_dinov2.lvd142m
+  embedding_dim: 384
+  num_classes: 5
+  unfreeze_blocks: 2 
+
+losses:
+  triplet_margin: 0.3
+  lambda_triplet: 0.7
+
+optimizer:
+  name: adamw
+  lr: 2e-6
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+scheduler:
+  name: cosine
+  t_max: 50  # epochs para ciclo completo
+  eta_min: 1e-7
+
+training:
+  batch_size: 28
+  num_workers: 2
+  epochs: 50
+  mixed_precision: true
+  grad_clip: 1.0
+  pin_memory: false
+  persistent_workers: false
+  enable_checkpointing: true
+  gradient_accumulation_steps: 2
+
+validation:
+  k_nn_k: 5
+  pca_components: 50
+  tsne: true
+
+logging:
+  tensorboard_flush_secs: 30
+  log_every_steps: 1
+  save_every_epoch: true
+
+checkpointing:
+  best_metric: val_accuracy
+  save_best: true
+  metric_mode: max
+
+device: cuda  # auto -> cuda si disponible, sino cpu
