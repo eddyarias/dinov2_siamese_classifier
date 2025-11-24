@@ -166,7 +166,7 @@ def compute_distance_histograms(embeds: np.ndarray, labels: np.ndarray, out_dir:
 def main():
     parser = argparse.ArgumentParser(description='Evaluación y métricas sobre conjunto de prueba (sin aumentos).')
     parser.add_argument('--checkpoint_dir', type=Path, required=True, help='Directorio de la corrida (checkpoint_YYYYMMDD_HHMMSS)')
-    parser.add_argument('--list_name', type=str, default='validation.txt', help='Nombre del archivo de lista para evaluación (default validation.txt)')
+    parser.add_argument('--list_name', type=str, default='test.txt', help='Nombre del archivo de lista para evaluación (default test.txt)')
     parser.add_argument('--method_2d', type=str, choices=['pca', 'tsne'], default='pca', help='Método para visualización 2D')
     parser.add_argument('--no_tsne_fallback', action='store_true', help='No intentar TSNE si se elige pca (solo pca).')
     args = parser.parse_args()
