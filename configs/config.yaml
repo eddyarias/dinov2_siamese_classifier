@@ -41,6 +41,9 @@ training:
   persistent_workers: false
   enable_checkpointing: true
   gradient_accumulation_steps: 2
+  # (opcional) Ruta a un .pth para cargar pesos iniciales del modelo.
+  # Si se deja vacío o null, se entrena desde cero.
+  resume_checkpoint: checkpoints/aws_Ec2_checkpoint_20251123_204302_epoch_1/best.pth
 
 validation:
   k_nn_k: 5

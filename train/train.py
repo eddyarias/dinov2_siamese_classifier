@@ -182,6 +182,21 @@ def train(cfg_path: str = 'configs/config.yaml'):
     with open(snapshot_path, 'w', encoding='utf-8') as f:
         json.dump(snapshot, f, ensure_ascii=False, indent=2)
     model = build_model(cfg).to(device)
+    # Carga opcional de checkpoint inicial si se especifica en config (training.resume_checkpoint)
+    resume_path = cfg.get('training', {}).get('resume_checkpoint')
+    if resume_path:
+        if not os.path.isfile(resume_path):
+            raise FileNotFoundError(f"Checkpoint para reanudar no encontrado: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        # Detectar formato (puede ser dict con 'model_state' o directamente state_dict)
+        if isinstance(ckpt, dict) and 'model_state' in ckpt:
+            model.load_state_dict(ckpt['model_state'], strict=True)
+            print(f"[INFO] Pesos del modelo cargados desde '{resume_path}' (epoch={ckpt.get('epoch','?')}, val_accuracy={ckpt.get('val_accuracy','?')}).")
+            # Opcional: usar la métrica del checkpoint como punto de partida para best_val
+            # Se mantiene entrenamiento desde epoch=1 de esta nueva corrida.
+        else:
+            model.load_state_dict(ckpt, strict=False)
+            print(f"[INFO] State dict cargado desde '{resume_path}' (formato directo).")
     # Activar gradient checkpointing opcional
     if cfg['training'].get('enable_checkpointing') and hasattr(model.backbone, 'set_grad_checkpointing'):
         model.backbone.set_grad_checkpointing(True)
