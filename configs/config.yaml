@@ -3,7 +3,7 @@ seed: 42
 
 paths:
   countries_root: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/croped/local   # carpeta que contiene subdirectorios país (arg, bra, chl, col, mex, per, ury, ...)
-  metadata: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/metadata_estadistic_strategy.json  # archivo con factores de balanceo
+  metadata: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/metadata_estadistic_strategy.json  #  archivo con factores de balanceo
   checkpoints_dir: checkpoints
   logs_dir: logs
 
@@ -22,26 +22,28 @@ losses:
 
 optimizer:
   name: adamw
-  lr: 2e-6
+  lr: 1e-5  # Aumentado para converger en pocas épocas
   weight_decay: 0.01
   betas: [0.9, 0.999]
 
 scheduler:
   name: cosine
-  t_max: 50  # epochs para ciclo completo
+  t_max: auto  # ajustar automáticamente al número real de épocas
   eta_min: 1e-7
 
 training:
-  batch_size: 4
+  batch_size: 32
   num_workers: 1
-  epochs: 3
+  epochs: 2
   mixed_precision: true
   grad_clip: 1.0
   pin_memory: false
   persistent_workers: false
   enable_checkpointing: true
   gradient_accumulation_steps: 2
-  resume_checkpoint: checkpoints/checkpoint_20251124_104428/best.pth
+  repeat_dataloader: 1  # repetir el dataloader dentro de cada época si se desea mayor cobertura sin aumentar épocas
+  warmup_steps: 0  # pasos de warmup lineal para subir lr gradualmente (ajustar si se ve inestabilidad)
+  resume_checkpoint: checkpoints/aws_Ec2_checkpoint_20251123_204302_epoch_2/best.pth
 
 validation:
   k_nn_k: 5

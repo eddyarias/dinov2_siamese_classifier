@@ -59,25 +59,47 @@ def load_model_from_checkpoint(ckpt_path: str, cfg: Dict[str, Any], device: str)
     return model
 
 
-def compute_embeddings(model, loader, device: str):
+def compute_embeddings(
+    model,
+    loader,
+    device: str,
+    collect_embeddings: bool = True,
+    max_eval_samples: int | None = None,
+    amp: bool = False,
+    report_every: int = 0,
+):
+    """Devuelve (embeds, logits, labels, preds, countries). Si collect_embeddings=False,
+    'embeds' será None y se saltan gráficos dependientes de embeddings.
+    max_eval_samples limita el número total de muestras procesadas (para fast mode)."""
+    device_type = 'cuda' if device.startswith('cuda') else 'cpu'
     all_embeds = []
     all_logits = []
     all_labels = []
-    all_countries = []
+    all_countries: list[str] = []
+    seen = 0
+    model.eval()
     with torch.no_grad():
-        for batch in loader:
+        for b_idx, batch in enumerate(loader):
             anchors = batch['anchors'].to(device)
             labels = batch['labels'].to(device)
-            out = model(anchor=anchors)
-            all_embeds.append(out['anchor_embedding'].cpu())
-            all_logits.append(out['anchor_logits'].cpu())
+            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=amp and device_type=='cuda'):
+                out = model(anchor=anchors)
+            logits_cpu = out['anchor_logits'].cpu()
+            all_logits.append(logits_cpu)
             all_labels.append(labels.cpu())
             all_countries.extend(batch['countries'])
-    embeds = torch.cat(all_embeds, dim=0).numpy()
+            if collect_embeddings:
+                all_embeds.append(out['anchor_embedding'].cpu())
+            seen += anchors.size(0)
+            if report_every > 0 and (b_idx + 1) % report_every == 0:
+                print(f"[Eval] Procesadas {seen} muestras...")
+            if max_eval_samples is not None and seen >= max_eval_samples:
+                break
     logits = torch.cat(all_logits, dim=0).numpy()
-    labels = torch.cat(all_labels, dim=0).numpy()
+    labels_np = torch.cat(all_labels, dim=0).numpy()
     preds = logits.argmax(axis=1)
-    return embeds, logits, labels, preds, np.array(all_countries)
+    embeds_np = torch.cat(all_embeds, dim=0).numpy() if collect_embeddings and all_embeds else None
+    return embeds_np, logits, labels_np, preds, np.array(all_countries)
 
 
 def plot_confusion(labels, preds, class_names: List[str], out_path: str, title: str):
@@ -169,11 +191,17 @@ def compute_distance_histograms(embeds: np.ndarray, labels: np.ndarray, out_dir:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluación y métricas sobre conjunto de prueba (sin aumentos).')
+    parser = argparse.ArgumentParser(description='Evaluación y métricas sobre conjunto de prueba (rápida opcional).')
     parser.add_argument('--checkpoint_dir', type=Path, required=True, help='Directorio de la corrida (checkpoint_YYYYMMDD_HHMMSS)')
-    parser.add_argument('--list_name', type=str, default='train.txt', help='Nombre del archivo de lista para evaluación (default test.txt)')
+    parser.add_argument('--list_name', type=str, default='test.txt', help='Nombre del archivo de lista para evaluación (default test.txt)')
     parser.add_argument('--method_2d', type=str, choices=['pca', 'tsne'], default='pca', help='Método para visualización 2D')
     parser.add_argument('--no_tsne_fallback', action='store_true', help='No intentar TSNE si se elige pca (solo pca).')
+    parser.add_argument('--fast', action='store_true', help='Modo rápido: limita muestras, desactiva TSNE extra y métricas por país.')
+    parser.add_argument('--skip_embeddings', action='store_true', help='No calcular embeddings (solo logits y métricas de clasificación).')
+    parser.add_argument('--max_eval_samples', type=int, default=None, help='Máximo de muestras a evaluar (fast).')
+    parser.add_argument('--eval_batch_size', type=int, default=None, help='Batch size para evaluación (sobrescribe config).')
+    parser.add_argument('--amp', action='store_true', help='Usar autocast fp16 para acelerar en GPU.')
+    parser.add_argument('--report_every', type=int, default=0, help='Imprimir progreso cada N lotes.')
     args = parser.parse_args()
 
     # Construir nombre de snapshot: snapshot_parameters_YYYYMMDD_HHMMSS.json
@@ -188,15 +216,17 @@ def main():
     cfg = load_config(cfg_path)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'Usando dispositivo: {device}')
     eval_tf = build_transforms(cfg)
 
     root_dir = cfg['paths']['countries_root']
     metadata_path = cfg['paths']['metadata']
     ds = BalancedMultiCountryTripletDataset(root_dir=root_dir, metadata_path=metadata_path, list_filename=args.list_name, transform=eval_tf, apply_balancing=False)
 
+    eval_batch_size = args.eval_batch_size or cfg['training']['batch_size']
     loader = DataLoader(
         ds,
-        batch_size=cfg['training']['batch_size'],
+        batch_size=eval_batch_size,
         shuffle=False,
         num_workers=cfg['training']['num_workers'],
         pin_memory=cfg['training']['pin_memory'],
@@ -209,7 +239,20 @@ def main():
         raise FileNotFoundError(f'best.pth no encontrado en {args.checkpoint_dir}')
     model = load_model_from_checkpoint(str(best_ckpt), cfg, device)
 
-    embeds, logits, labels, preds, countries = compute_embeddings(model, loader, device)
+    # Determinar límites fast
+    max_eval_samples = args.max_eval_samples
+    if args.fast and max_eval_samples is None:
+        # heurística: procesar como máximo 5000 muestras en modo rápido si dataset es mayor
+        max_eval_samples = 5000
+    embeds, logits, labels, preds, countries = compute_embeddings(
+        model,
+        loader,
+        device,
+        collect_embeddings=not args.skip_embeddings,
+        max_eval_samples=max_eval_samples,
+        amp=args.amp,
+        report_every=args.report_every,
+    )
 
     # Preparar carpeta metrics
     metrics_dir = args.checkpoint_dir / 'metrics'
@@ -224,35 +267,38 @@ def main():
     report = save_classification_report(labels, preds, class_names, str(metrics_dir / 'classification_report_all.txt'))
 
     # 2D embedding plot
-    plot_embeddings_2d(embeds, labels, class_names, str(metrics_dir / f'{args.method_2d}_all.png'), method=args.method_2d)
-    if args.method_2d == 'pca' and not args.no_tsne_fallback:
-        try:
-            plot_embeddings_2d(embeds, labels, class_names, str(metrics_dir / 'tsne_all.png'), method='tsne')
-        except Exception:
-            pass
-
-    # Distance histograms
-    compute_distance_histograms(embeds, labels, str(metrics_dir))
+    if embeds is not None:
+        plot_embeddings_2d(embeds, labels, class_names, str(metrics_dir / f'{args.method_2d}_all.png'), method=args.method_2d)
+        if (not args.skip_embeddings) and args.method_2d == 'pca' and not args.no_tsne_fallback and not args.fast:
+            try:
+                plot_embeddings_2d(embeds, labels, class_names, str(metrics_dir / 'tsne_all.png'), method='tsne')
+            except Exception:
+                pass
+        if not args.fast:
+            compute_distance_histograms(embeds, labels, str(metrics_dir))
 
     # Por país
     unique_countries = sorted(np.unique(countries))
-    for ct in unique_countries:
-        ct_mask = countries == ct
-        ct_dir = metrics_dir / f'country_{ct}'
-        ct_dir.mkdir(exist_ok=True)
-        ct_labels = labels[ct_mask]
-        ct_preds = preds[ct_mask]
-        ct_embeds = embeds[ct_mask]
-        if len(ct_labels) == 0:
-            continue
-        plot_confusion(ct_labels, ct_preds, class_names, str(ct_dir / 'confusion.png'), f'Confusion ({ct})')
-        save_classification_report(ct_labels, ct_preds, class_names, str(ct_dir / 'classification_report.txt'))
-        # Embedding plot per country (pca o tsne según método global)
-        plot_embeddings_2d(ct_embeds, ct_labels, class_names, str(ct_dir / f'{args.method_2d}.png'), method=args.method_2d)
+    if not args.fast:  # saltar métricas por país en modo rápido
+        for ct in unique_countries:
+            ct_mask = countries == ct
+            ct_dir = metrics_dir / f'country_{ct}'
+            ct_dir.mkdir(exist_ok=True)
+            ct_labels = labels[ct_mask]
+            ct_preds = preds[ct_mask]
+            if len(ct_labels) == 0:
+                continue
+            plot_confusion(ct_labels, ct_preds, class_names, str(ct_dir / 'confusion.png'), f'Confusion ({ct})')
+            save_classification_report(ct_labels, ct_preds, class_names, str(ct_dir / 'classification_report.txt'))
+            if embeds is not None:
+                ct_embeds = embeds[ct_mask]
+                plot_embeddings_2d(ct_embeds, ct_labels, class_names, str(ct_dir / f'{args.method_2d}.png'), method=args.method_2d)
 
     # Sin archivo summary.json (solicitud: no summary). Sólo imprimir resumen.
     print('Evaluación completada. Métricas en:', metrics_dir)
-    print('Resumen: samples=', labels.shape[0], 'countries=', unique_countries, 'accuracy=', float((preds == labels).mean()))
+    print('Resumen: samples=', labels.shape[0], 'countries=', unique_countries, 'accuracy=', float((preds == labels).mean()), 'fast_mode=', args.fast)
+    if max_eval_samples is not None:
+        print(f'Limitación de muestras aplicada: {labels.shape[0]} / {max_eval_samples}')
 
 
 if __name__ == '__main__':

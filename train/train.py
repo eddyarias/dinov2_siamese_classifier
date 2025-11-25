@@ -95,7 +95,7 @@ def build_model(cfg: Dict[str, Any]):
     return model
 
 
-def build_optimizer_scheduler(model, cfg):
+def build_optimizer_scheduler(model, cfg, epochs: int):
     ocfg = cfg['optimizer']
     params = [p for p in model.parameters() if p.requires_grad]
     # Normalizar tipos (pueden venir como strings del YAML)
@@ -110,12 +110,19 @@ def build_optimizer_scheduler(model, cfg):
 
     scfg = cfg['scheduler']
     if scfg['name'] == 'cosine':
-        t_max = int(scfg['t_max'])
+        raw_t_max = scfg['t_max']
+        if isinstance(raw_t_max, str) and raw_t_max.lower() == 'auto':
+            t_max = epochs  # adaptar longitud del ciclo al número real de épocas
+        else:
+            t_max = int(raw_t_max)
+        # Si configuración pide más que las épocas reales, recortar para pocas épocas
+        if t_max > epochs:
+            t_max = epochs
         eta_min = float(scfg['eta_min'])
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
     else:
         scheduler = None
-    return optimizer, scheduler
+    return optimizer, scheduler, lr
 
 
 def save_checkpoint(state: Dict[str, Any], path: str):
@@ -204,7 +211,8 @@ def train(cfg_path: str = 'configs/config.yaml'):
         margin=cfg['losses']['triplet_margin'],
         lambda_triplet=cfg['losses']['lambda_triplet']
     )
-    optimizer, scheduler = build_optimizer_scheduler(model, cfg)
+    epochs = cfg['training']['epochs']
+    optimizer, scheduler, base_lr = build_optimizer_scheduler(model, cfg, epochs)
 
     logger = TensorBoardLogger(cfg['paths']['logs_dir'])
 
@@ -212,7 +220,10 @@ def train(cfg_path: str = 'configs/config.yaml'):
     device_type = 'cuda' if device.startswith('cuda') else 'cpu'
     # GradScaler nueva API: primer argumento posicional = device ('cuda'/'cpu'). En versiones actuales solo 'cuda' habilita escalado.
     scaler = torch.amp.GradScaler(device_type, enabled=cfg['training']['mixed_precision'] and device_type == 'cuda')
-    epochs = cfg['training']['epochs']
+    # Parámetros para escenarios de pocas épocas
+    repeat_dataloader = int(cfg['training'].get('repeat_dataloader', 1))  # repetir recorrido del dataloader dentro de una época
+    warmup_steps = int(cfg['training'].get('warmup_steps', 0))  # pasos de optimizador para warmup lineal
+    optimizer_steps = 0  # cuenta de pasos reales (no incluye acumulación parcial)
     global_step = 0
 
     best_val = -float('inf')
@@ -221,53 +232,63 @@ def train(cfg_path: str = 'configs/config.yaml'):
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_start = time.time()
-        train_iter = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [train]", leave=False)
         accum_steps = int(cfg['training'].get('gradient_accumulation_steps', 1))
         epoch_loss_sum = 0.0
         epoch_loss_count = 0
-        for batch_idx, batch in enumerate(train_iter, start=1):
-            anchors = batch['anchors'].to(device)
-            positives = batch['positives'].to(device)
-            negatives = batch['negatives'].to(device)
-            labels = batch['labels'].to(device)
+        for rep in range(repeat_dataloader):
+            train_iter = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [train r{rep+1}/{repeat_dataloader}]", leave=False)
+            for batch_idx, batch in enumerate(train_iter, start=1):
+                anchors = batch['anchors'].to(device)
+                positives = batch['positives'].to(device)
+                negatives = batch['negatives'].to(device)
+                labels = batch['labels'].to(device)
 
-            # Reiniciar gradientes al inicio de cada grupo de acumulación
-            if (batch_idx - 1) % accum_steps == 0:
-                optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type=device_type, enabled=cfg['training']['mixed_precision'] and device_type == 'cuda'):
-                out = model(anchor=anchors, positive=positives, negative=negatives)
-                losses = loss_fn(out['anchor_embedding'], out['positive_embedding'], out['negative_embedding'], out['anchor_logits'], labels)
-                total_loss = losses['total_loss']
-                scaled_loss = total_loss / accum_steps
+                if (batch_idx - 1) % accum_steps == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type=device_type, enabled=cfg['training']['mixed_precision'] and device_type == 'cuda'):
+                    out = model(anchor=anchors, positive=positives, negative=negatives)
+                    losses = loss_fn(out['anchor_embedding'], out['positive_embedding'], out['negative_embedding'], out['anchor_logits'], labels)
+                    total_loss = losses['total_loss']
+                    scaled_loss = total_loss / accum_steps
 
-            scaler.scale(scaled_loss).backward()
-            if batch_idx % accum_steps == 0:
-                if cfg['training']['grad_clip'] is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
-                scaler.step(optimizer)
-                scaler.update()
-                if scheduler is not None:
-                    scheduler.step()
+                scaler.scale(scaled_loss).backward()
+                if batch_idx % accum_steps == 0:
+                    if cfg['training']['grad_clip'] is not None:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer_steps += 1
+                    # Warmup lineal para pocas épocas
+                    if warmup_steps > 0 and optimizer_steps <= warmup_steps:
+                        warmup_lr = base_lr * (optimizer_steps / warmup_steps)
+                        for pg in optimizer.param_groups:
+                            pg['lr'] = warmup_lr
+                    elif warmup_steps > 0 and optimizer_steps == warmup_steps + 1:
+                        # Restaurar lr base justo después de warmup
+                        for pg in optimizer.param_groups:
+                            pg['lr'] = base_lr
+                    if scheduler is not None:
+                        scheduler.step()
 
-            acc = classification_accuracy(out['anchor_logits'], labels)
-            emb_norm = embedding_norm(out['anchor_embedding'])
+                acc = classification_accuracy(out['anchor_logits'], labels)
+                emb_norm = embedding_norm(out['anchor_embedding'])
 
-            step_metrics = {
-                'train/total_loss': total_loss.item(),
-                'train/triplet_loss': losses['triplet_loss'].item(),
-                'train/ce_loss': losses['ce_loss'].item(),
-                'train/acc': acc,
-                'train/pos_dist': losses['d_pos'],
-                'train/neg_dist': losses['d_neg'],
-                'train/emb_norm': emb_norm,
-                'lr': optimizer.param_groups[0]['lr'],
-            }
-            logger.log_step(global_step, step_metrics)
-            train_iter.set_postfix({'loss': f"{total_loss.item():.3f}", 'acc': f"{acc:.3f}"})
-            global_step += 1
-            epoch_loss_sum += total_loss.item()
-            epoch_loss_count += 1
+                step_metrics = {
+                    'train/total_loss': total_loss.item(),
+                    'train/triplet_loss': losses['triplet_loss'].item(),
+                    'train/ce_loss': losses['ce_loss'].item(),
+                    'train/acc': acc,
+                    'train/pos_dist': losses['d_pos'],
+                    'train/neg_dist': losses['d_neg'],
+                    'train/emb_norm': emb_norm,
+                    'lr': optimizer.param_groups[0]['lr'],
+                }
+                logger.log_step(global_step, step_metrics)
+                train_iter.set_postfix({'loss': f"{total_loss.item():.3f}", 'acc': f"{acc:.3f}"})
+                global_step += 1
+                epoch_loss_sum += total_loss.item()
+                epoch_loss_count += 1
 
         # Validación con barra
         model.eval()
