@@ -82,23 +82,28 @@ def compute_embeddings(model, loader, device: str):
 
 def plot_confusion(labels, preds, class_names: List[str], out_path: str, title: str):
     cm = confusion_matrix(labels, preds)
+    row_sums = cm.sum(axis=1, keepdims=True)
+    # Evitar división por cero (filas sin ejemplos)
+    row_sums[row_sums == 0] = 1
+    cm_pct = (cm / row_sums) * 100.0
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cm, cmap='Blues')
-    ax.set_title(title)
+    im = ax.imshow(cm_pct, cmap='Blues', vmin=0, vmax=100)
+    ax.set_title(f'{title} (Percent)')
     ax.set_xlabel('Predicted')
     ax.set_ylabel('True')
     ax.set_xticks(range(len(class_names)))
     ax.set_xticklabels(class_names, rotation=45, ha='right')
     ax.set_yticks(range(len(class_names)))
     ax.set_yticklabels(class_names)
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, cm[i, j], ha='center', va='center', color='black')
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    for i in range(cm_pct.shape[0]):
+        for j in range(cm_pct.shape[1]):
+            ax.text(j, i, f'{cm_pct[i, j]:.1f}%', ha='center', va='center', color='black')
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('% within true class')
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
-    return cm
+    return cm_pct
 
 
 def plot_embeddings_2d(embeds: np.ndarray, labels: np.ndarray, class_names: List[str], out_path: str, method: str = 'pca'):
@@ -166,7 +171,7 @@ def compute_distance_histograms(embeds: np.ndarray, labels: np.ndarray, out_dir:
 def main():
     parser = argparse.ArgumentParser(description='Evaluación y métricas sobre conjunto de prueba (sin aumentos).')
     parser.add_argument('--checkpoint_dir', type=Path, required=True, help='Directorio de la corrida (checkpoint_YYYYMMDD_HHMMSS)')
-    parser.add_argument('--list_name', type=str, default='test.txt', help='Nombre del archivo de lista para evaluación (default test.txt)')
+    parser.add_argument('--list_name', type=str, default='train.txt', help='Nombre del archivo de lista para evaluación (default test.txt)')
     parser.add_argument('--method_2d', type=str, choices=['pca', 'tsne'], default='pca', help='Método para visualización 2D')
     parser.add_argument('--no_tsne_fallback', action='store_true', help='No intentar TSNE si se elige pca (solo pca).')
     args = parser.parse_args()

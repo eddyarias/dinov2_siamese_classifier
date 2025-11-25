@@ -6,6 +6,7 @@ from typing import List, Tuple, Dict, Any
 from PIL import Image
 from torch.utils.data import Dataset
 from tqdm.auto import tqdm
+from .data_agumentation import augment_for_country, FACTOR_LIMIT
 
 class BalancedMultiCountryTripletDataset(Dataset):
     def __init__(
@@ -117,9 +118,8 @@ class BalancedMultiCountryTripletDataset(Dataset):
         # Con balanceo: repetir índices según factor (entero aproximado)
         for country, indices in self.country_indices.items():
             factor = self.country_factors.get(country, 1.0)
-            repeat_times = int(round(factor))
-            if repeat_times < 1:
-                repeat_times = 1
+            # Limitar número de réplicas según especificación (incluye la instancia original)
+            repeat_times = min(max(int(round(factor)), 1), FACTOR_LIMIT)
             for _ in range(repeat_times):
                 self.virtual_index.extend(indices)
         random.shuffle(self.virtual_index)
@@ -163,8 +163,8 @@ class BalancedMultiCountryTripletDataset(Dataset):
         anchor_path, anchor_label, anchor_country = self.samples[real_idx]
         pos_idx = self._sample_positive(real_idx, anchor_label)
         neg_idx = self._sample_negative(anchor_label)
-        pos_path, _, _ = self.samples[pos_idx]
-        neg_path, _, _ = self.samples[neg_idx]
+        pos_path, _, pos_country = self.samples[pos_idx]
+        neg_path, _, neg_country = self.samples[neg_idx]
 
         anchor_img = self._load_image(anchor_path)
         pos_img = self._load_image(pos_path)
@@ -198,6 +198,15 @@ class BalancedMultiCountryTripletDataset(Dataset):
 
         if anchor_img is None or pos_img is None or neg_img is None:
             raise RuntimeError("Fallo al cargar imágenes tras reintentos.")
+
+        # Augmentación condicional por factor de país (solo si >1)
+        if self.apply_balancing:
+            anchor_factor = self.country_factors.get(anchor_country, 1.0)
+            pos_factor = self.country_factors.get(pos_country, 1.0)
+            neg_factor = self.country_factors.get(neg_country, 1.0)
+            anchor_img = augment_for_country(anchor_img, anchor_factor)
+            pos_img = augment_for_country(pos_img, pos_factor)
+            neg_img = augment_for_country(neg_img, neg_factor)
 
         if self.transform:
             anchor_img = self.transform(anchor_img)

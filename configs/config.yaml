@@ -3,7 +3,7 @@ seed: 42
 
 paths:
   countries_root: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/croped/local   # carpeta que contiene subdirectorios país (arg, bra, chl, col, mex, per, ury, ...)
-  metadata: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/metadata - copia.json  # archivo con factores de balanceo
+  metadata: /mnt/c/Users/eddyarias/Datasets/fakeid/lists/metadata_estadistic_strategy.json  # archivo con factores de balanceo
   checkpoints_dir: checkpoints
   logs_dir: logs
 
@@ -41,8 +41,6 @@ training:
   persistent_workers: false
   enable_checkpointing: true
   gradient_accumulation_steps: 2
-  # (opcional) Ruta a un .pth para cargar pesos iniciales del modelo.
-  # Si se deja vacío o null, se entrena desde cero.
   resume_checkpoint: checkpoints/checkpoint_20251124_104428/best.pth
 
 validation:
